@@ -165,7 +165,13 @@ namespace CapriMod
             try
             {
                 var hand = Main.RightHand ?? Main.LeftHand;
-                if (hand != null && hand.transform != null) return hand.transform.position;
+                if (hand != null)
+                {
+                    // Hand — IL2CPP-объект: трансформу берём из GameObject'а (Mono-безопасно),
+                    // рефлексивный доступ к il2cpp-свойству transform может не сработать.
+                    var go = hand.gameObject;
+                    if (go != null && go.transform != null) return go.transform.position;
+                }
             }
             catch { /* межпоточная/версионная проблема — падаем на голову */ }
             return GameBridge.HeadPosition;
@@ -183,8 +189,14 @@ namespace CapriMod
                 var rb = col.attachedRigidbody;
                 if (rb == null || rb.isKinematic) continue;
                 // не хватаем части тела игрока и сам чип
-                if (rb.GetComponentInParent<RigManager>() != null) continue;
-                if (rb.GetComponentInParent<CapriChip>() != null) continue;
+                try
+                {
+                    var chipCol = col.GetComponentInParent<CapriChip>();
+                    if (chipCol != null) continue;
+                }
+                catch { }
+                try { if (rb.GetComponentInParent<RigManager>() != null) continue; }
+                catch { /* межпотоковая проверка il2cpp-компонента — пропускаем объект */ continue; }
                 float d = Vector3.Distance(from, rb.position);
                 if (d < bestDist) { bestDist = d; best = rb; }
             }

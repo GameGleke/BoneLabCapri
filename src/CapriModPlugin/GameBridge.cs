@@ -23,27 +23,29 @@ namespace CapriMod
         {
             _rigPtrHolder = rig;
             Main.Rig = rig;
-            try
-            {
-                // публичные свойства RigManager (проверено по BoneLib): leftHand/rightHand
-                var t = rig.GetIl2CppType();
-                Main.LeftHand = GetHandProp(rig, t, "leftHand");
-                Main.RightHand = GetHandProp(rig, t, "rightHand");
-            }
-            catch (Exception e) { MelonLogger.Warning($"GameBridge hands: {e.Message}"); }
+            // Руки ищем лениво в ReadControllerAxes (GetHandProp) — не при кэшировании рига.
         }
 
-        /// <summary>Вызов get-метода через стандартный рефлексивный вызов Il2CppInterop
-        /// (main thread — из PlayerLocator/Melon OnUpdate).</summary>
-        private static Hand GetHandProp(RigManager rig, Type t, string propName)
+        /// <summary>Получить руку рига: сначала типизированное свойство (есть во всех версиях
+        /// interop: RigManager.leftHand/rightHand), затем рефлексия по имени как fallback.</summary>
+        private static Hand GetHandProp(RigManager rig, string propName)
         {
             try
             {
+                // 1) типизированный доступ (компилируется против Il2CppSLZ.Marrow.dll вашей игры)
+                Hand typed = propName == "leftHand" ? rig.leftHand : rig.rightHand;
+                if (typed != null) return typed;
+            }
+            catch { }
+            try
+            {
+                // 2) рефлексия по IL2CPP-типу
+                var t = rig.GetIl2CppType();
                 foreach (var m in t.GetMethods())
                 {
                     if (!string.Equals(m.Name, "get_" + propName, StringComparison.OrdinalIgnoreCase)) continue;
                     if (m.GetParameters().Length != 0) continue;
-                    return m.Invoke(rig, null) as Hand; // Il2CppInterop поддерживает reflection для il2cpp-типов
+                    return m.Invoke(rig, null) as Hand;
                 }
             }
             catch { }
@@ -133,47 +135,57 @@ namespace CapriMod
         public static bool ReadControllerAxes(out float grip, out float trigger)
         {
             grip = 0f; trigger = 0f;
+
+            // руки обновляем лениво (на случай перевыбора аватара/сцены)
+            if ((Main.RightHand == null || !Main.RightHand.gameObject.activeInHierarchy) && Main.Rig != null)
+                Main.RightHand = GetHandProp(Main.Rig, "rightHand");
+            if ((Main.LeftHand == null || !Main.LeftHand.gameObject.activeInHierarchy) && Main.Rig != null)
+                Main.LeftHand = GetHandProp(Main.Rig, "leftHand");
+
             var hand = Main.RightHand != null ? Main.RightHand : Main.LeftHand;
             if (hand == null) return false;
             try
             {
-                // Только рефлексия по публичным полям/свойствам BaseController —
-                // прямые обращения к m_GripAxis/m_TriggerAxis ломают сборку на других версиях interop.
+                // Рефлексия через Il2Cpp-методы BaseController (публичные поля gripAxis/triggerAxis).
+                // Прямые обращения к m_GripAxis/m_TriggerAxis ломают сборку на других версиях interop.
                 var c = hand.Controller;
                 if (c == null) return false;
-                object controllerObj = ToObject(c); // Mono-обёртка: надёжная рефлексия
-                var t = controllerObj.GetType();
-                object g = GetMember(t, controllerObj, "m_GripAxis") ?? GetMember(t, controllerObj, "gripAxis");
-                object tr = GetMember(t, controllerObj, "m_TriggerAxis") ?? GetMember(t, controllerObj, "triggerAxis");
+                var t = c.GetIl2CppType();
+                object g = GetIl2Member(c, t, "gripAxis") ?? GetIl2Member(c, t, "m_GripAxis");
+                object tr = GetIl2Member(c, t, "triggerAxis") ?? GetIl2Member(c, t, "m_TriggerAxis");
                 if (g is float gf && tr is float tf) { grip = gf; trigger = tf; return true; }
             }
             catch { }
             return false;
         }
 
-        /// <summary>Il2Cpp-объект -> Mono-объект через protected Il2CppObjectBase.ptr (рефлексией).</summary>
-        private static object ToObject(object il2cppObj)
+        /// <summary>Чтение il2cpp-поля/свойства: сначала Mono-рефлексия по Il2Cpp-обёртке
+        /// (interop генерирует свойства с теми же именами), затем IL2CPP FieldInfo/PropertyInfo.</summary>
+        private static object GetIl2Member(Il2CppObjectBase obj, Type il2cppType, string name)
         {
-            if (il2cppObj == null) return null;
-            var ptrProp = il2cppObj.GetType().GetProperty("ptr",
-                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            if (ptrProp != null)
+            try
             {
-                var mono = System.Runtime.InteropServices.Marshal.PtrToStructure(
-                    (IntPtr)ptrProp.GetValue(il2cppObj, null), il2cppObj.GetType());
-                if (mono != null) return mono;
+                var monoField = obj.GetType().GetField(name,
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (monoField != null) return monoField.GetValue(obj);
+                var monoProp = obj.GetType().GetProperty(name,
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (monoProp != null) return monoProp.GetValue(obj, null);
             }
-            return il2cppObj;
-        }
-
-        private static object GetMember(Type t, object inst, string name)
-        {
-            const System.Reflection.BindingFlags F = System.Reflection.BindingFlags.Instance |
-                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
-            var fld = t.GetField(name, F);
-            if (fld != null) return fld.GetValue(inst);
-            var prp = t.GetProperty(name, F);
-            if (prp != null) return prp.GetValue(inst);
+            catch { }
+            try
+            {
+                const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                var fld = il2cppType.GetField(name, F);
+                if (fld != null) return fld.GetValue(obj);
+                foreach (var m in il2cppType.GetMethods(F))
+                {
+                    if (!string.Equals(m.Name, "get_" + name, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (m.GetParameters().Length != 0) continue;
+                    return m.Invoke(obj, null);
+                }
+            }
+            catch { }
             return null;
         }
 
@@ -257,6 +269,20 @@ namespace CapriMod
         }
 
         // ============ УРОН ЦЕЛИ ============
+        /// <summary>Безопасный GetComponentInParent для IL2CPP-компонентов: у il2cpp-обёрток
+        /// перегружен оператор == (null-check работает), но методы Unity могут кидать исключение
+        /// вне игрового потока — всё в try/catch, при ошибке считаем что компонента нет.</summary>
+        private static T SafeGetComponentInParent<T>(GameObject go) where T : class
+        {
+            if (go == null) return null;
+            try
+            {
+                var comp = go.GetComponentInParent<T>();
+                return comp != null ? comp : null;
+            }
+            catch { return null; }
+        }
+
         /// <summary>Найти цель по лучу взгляда: NPC (AIBrain/NPCHealth) или другой игрок (Player_Health).</summary>
         public static Transform FindLookTarget(float range, out GameObject targetGO)
         {
@@ -267,9 +293,9 @@ namespace CapriMod
             {
                 var go = hit.collider.gameObject;
                 if (IsOwnPlayer(go)) continue;
-                if (go.GetComponentInParent<AIBrain>() != null ||
-                    go.GetComponentInParent<NPCHealth>() != null ||
-                    go.GetComponentInParent<Player_Health>() != null)
+                if (SafeGetComponentInParent<AIBrain>(go) != null ||
+                    SafeGetComponentInParent<NPCHealth>(go) != null ||
+                    SafeGetComponentInParent<Player_Health>(go) != null)
                 {
                     targetGO = go;
                     return hit.collider.transform;
@@ -283,9 +309,9 @@ namespace CapriMod
         {
             kind = null;
             if (targetGO == null) return null;
-            var npc = targetGO.GetComponentInParent<NPCHealth>();
+            var npc = SafeGetComponentInParent<NPCHealth>(targetGO);
             if (npc != null) { kind = "npc"; return npc; }
-            var ph = targetGO.GetComponentInParent<Player_Health>();
+            var ph = SafeGetComponentInParent<Player_Health>(targetGO);
             if (ph != null) { kind = "player"; return ph; }
             return null;
         }
@@ -308,9 +334,18 @@ namespace CapriMod
         {
             try
             {
+                if (Main.Rig != null)
+                {
+                    var rigGO = Main.Rig.gameObject;
+                    if (rigGO != null)
+                    {
+                        var ph = SafeGetComponentInParent<Player_Health>(rigGO);
+                        if (ph != null) return ph;
+                    }
+                }
                 var hp = FindHeadpoint();
                 if (hp == null) return null;
-                return hp.GetComponentInParent<Player_Health>();
+                return SafeGetComponentInParent<Player_Health>(hp.gameObject);
             }
             catch { return null; }
         }
@@ -321,7 +356,7 @@ namespace CapriMod
             try
             {
                 // RigManager — IL2CPP-объект: сравниваем напрямую (== перегружен interop'ом)
-                var rm = go.GetComponentInParent<RigManager>();
+                var rm = SafeGetComponentInParent<RigManager>(go);
                 return rm != null && rm == Main.Rig;
             }
             catch { return false; }
@@ -331,27 +366,32 @@ namespace CapriMod
         /// <summary>
         /// Нанести урон компоненту здоровья рефлексией — устойчиво к разным сигнатурам
         /// TAKEDAMAGE(float damage, Vector3 direction, DamageType type, ...) между версиями игры.
+        /// healthComp — IL2CPP-обёртка: ищем метод по Il2Cpp-типу, вызываем m.Invoke(obj, args).
         /// </summary>
         public static bool TakeDamage(object healthComp, float amount, Vector3 direction)
         {
             if (healthComp == null) return false;
             try
             {
-                var type = healthComp.GetType();
+                Type type = (healthComp as Il2CppObjectBase)?.GetIl2CppType() ?? healthComp.GetType();
                 foreach (var m in type.GetMethods())
                 {
                     if (!string.Equals(m.Name, "TAKEDAMAGE", StringComparison.OrdinalIgnoreCase)) continue;
                     var ps = m.GetParameters();
-                    if (ps.Length == 0 || ps[0].ParameterType != typeof(float)) continue;
+                    if (ps.Length == 0) continue;
+                    // первый параметр — float damage (в il2cpp-рефлекции типы могут приходить как Il2Cpp-обёртки)
+                    var p0 = ps[0].ParameterType;
+                    if (p0 != typeof(float) && p0.FullName != "System.Single") continue;
 
                     var args = new object[ps.Length];
                     args[0] = amount;
                     for (int i = 1; i < ps.Length; i++)
                     {
                         var pt = ps[i].ParameterType;
-                        if (pt == typeof(float)) args[i] = 0f;
-                        else if (pt == typeof(bool)) args[i] = true;
-                        else if (pt == typeof(Vector3)) args[i] = direction;
+                        string pn = pt.FullName ?? "";
+                        if (pt == typeof(float) || pn == "System.Single") args[i] = 0f;
+                        else if (pt == typeof(bool) || pn == "System.Boolean") args[i] = true;
+                        else if (pt == typeof(Vector3) || pn == "UnityEngine.Vector3") args[i] = direction;
                         else if (pt.IsEnum) args[i] = Activator.CreateInstance(pt);
                         else args[i] = null;
                     }
@@ -361,7 +401,7 @@ namespace CapriMod
             }
             catch (Exception e)
             {
-                MelonLogger.Warning($"GameBridge.TakeDamage({healthComp.GetType().Name}): {e.Message}");
+                MelonLogger.Warning($"GameBridge.TakeDamage: {e.Message}");
             }
             return false;
         }

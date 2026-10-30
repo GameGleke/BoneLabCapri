@@ -109,7 +109,8 @@ namespace CapriMod
             try
             {
                 if (Main.Rig == null) return;
-                Bridge.NotifyHandAttachFromHook(); // проверка «локальности» — уже в Mono-потоке
+                // «локальность» руки проверяем в Mono-потоке (ProcessFlags), здесь только флаг
+                Bridge.NotifyHandAttachFromHook();
             }
             catch (Exception e)
             {
