@@ -1,3 +1,4 @@
-__pycache__/
-*.pyc
-gen.log
+bin/
+obj/
+*.user
+.vs/
