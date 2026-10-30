@@ -103,37 +103,37 @@ namespace CapriMod
 
         // ============ ЭКИПИРОВКА ЧИПА В ГОЛОВУ ============
         /// <summary>
-        /// «Вставить чип в голову»: цепляем предмет к headpoint через встроенный в BoneLab
-        /// JointModule (так работают все игровые шлемы/очки). Надёжнее и проще, чем
-        /// EquippableSlot + привязка к bone-маске, и не требует контента из Unity.
+        /// «Вставить чип в голову»: держим предмет кинематически у headpoint (sticky-режим
+        /// в CapriChip.Update). Это единственный надёжный способ без кастомного Unity-контента:
+        /// JointModule/EquippableSlot требуют корректных serialized-полей ассетов игры.
         /// </summary>
         public static bool EquipChipToHead(GameObject chipGO)
         {
             if (Main.Rig == null || Main.Rig.m_Headpoint == null || chipGO == null) return false;
             try
             {
-                var head = Main.Rig.m_Headpoint;
-                var jm = chipGO.GetComponent<JointModule>();
-                if (jm == null) jm = chipGO.AddComponent<JointModule>();
-                jm.m_TargetBone = head;
-                jm.m_LocalPos = new Vector3(0.02f, 0.075f, 0.02f);
-                jm.m_LocalRot = Quaternion.Euler(0f, 0f, 0f);
-                jm.m_MatchTargetBoneScale = false;
-                jm.Start();
+                // освободить от руки, иначе рука «тянет» чип и дистанция не стабилизируется
+                try
+                {
+                    var grab = chipGO.GetComponent<Grabable>();
+                    if (grab != null)
+                    {
+                        var gp = grab.m_GripPoint;
+                        var attached = gp?.attachedTo;
+                        if (attached != null) attached.DetachObject(grab);
+                    }
+                }
+                catch { /* не критично */ }
+
+                var rb = chipGO.GetComponent<Rigidbody>();
+                if (rb != null) rb.isKinematic = true;
+                chipGO.GetComponent<CapriChip>()?.SetStickyMode(true);
                 return true;
             }
             catch (Exception e)
             {
-                MelonLogger.Warning($"GameBridge.EquipChipToHead(JointModule): {e.Message} — fallback на parent-привязку");
-                // Запасной путь: физически не цепляем, но фиксируем кинематически к голове (Update в CapriChip)
-                try
-                {
-                    var rb = chipGO.GetComponent<Rigidbody>();
-                    if (rb != null) rb.isKinematic = true;
-                    chipGO.GetComponent<CapriChip>()?.SetStickyMode(true);
-                    return true;
-                }
-                catch (Exception e2) { MelonLogger.Error($"Equip fallback: {e2}"); return false; }
+                MelonLogger.Error($"GameBridge.EquipChipToHead: {e}");
+                return false;
             }
         }
 
@@ -142,11 +142,11 @@ namespace CapriMod
             if (chipGO == null) return;
             try
             {
-                var jm = chipGO.GetComponent<JointModule>();
-                if (jm != null) jm.Stop();
+                chipGO.GetComponent<CapriChip>()?.SetStickyMode(false);
+                var rb = chipGO.GetComponent<Rigidbody>();
+                if (rb != null) rb.isKinematic = false;
             }
             catch (Exception e) { MelonLogger.Warning($"GameBridge.UnequipChip: {e.Message}"); }
-            try { chipGO.GetComponent<CapriChip>()?.SetStickyMode(false); } catch { }
         }
 
         // ============ УРОН ЦЕЛИ ============

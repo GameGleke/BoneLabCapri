@@ -100,7 +100,13 @@ namespace CapriMod
             _stickyMode = false;
             GameBridge.UnequipChip(gameObject);
             // освобождаем от руки, чтобы чип упал физически
-            try { GetComponent<Rigidbody>().isKinematic = false; } catch { }
+            try
+            {
+                var rb = GetComponent<Rigidbody>();
+                if (rb != null) rb.isKinematic = false;
+                transform.position = GameBridge.HeadPosition + new Vector3(0.25f, -0.1f, 0.25f);
+            }
+            catch { }
             _equipCooldownFrames = 20; // не «вставлять» обратно сразу
             MelonLogger.Msg("CapriMod: чип Капри снят.");
             CapriController.OnChipRemoved();

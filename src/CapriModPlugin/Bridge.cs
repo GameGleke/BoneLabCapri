@@ -80,7 +80,7 @@ namespace CapriMod
         // Мод сам создаёт предмет «CHIP OF CAPRI» при загрузке уровня —
         // все ассеты внутри DLL, отдельных папок не нужно.
 
-        private const string CHIP_NAME = "CHIP OF CAPRI";
+        public const string CHIP_NAME = "CHIP OF CAPRI";
 
         public static void EnsureChipInScene()
         {
@@ -116,30 +116,55 @@ namespace CapriMod
             // --- физика, чтобы игрушку можно было взять руками ---
             var rb = chipGO.AddComponent<Rigidbody>();
             rb.mass = 0.15f;
-            var marrows = chipGO.AddComponent<Marrows>();       // поверхность захвата (SLZ.Marrow)
-            marrows.m_CaptureScaleMultiplier = 1.6f;
 
-            // --- зона взаимодействия: поднёс к голове -> «вставил чип» ---
-            var inter = chipGO.AddComponent<InteractTrigger>();
-            inter.m_MaxGrabDistance = 0.35f;
-            inter.m_LocalPosition = new Vector3(0, 0, 0);
-            inter.m_LocalRotation = Quaternion.identity;
-            inter.m_InteractLayerMask = LayerMask.GetMask("Headpoint");
+            // Поверхность захвата Marrow (Marrows). Создаём компонент рефлексией:
+            // имя/тип в IL2CPP-сборке может отличаться между версиями игры.
+            TryAddMarrowGrabSurface(chipGO);
 
-            // --- наш скрипт-чип ---
+            // --- наш скрипт-чип: детект «вставки в голову» по дистанции ---
             chipGO.AddComponent<CapriChip>();
 
-            // --- подпись над чипом ---
-            var label = new GameObject("ChipLabel");
-            label.transform.SetParent(chipGO.transform, false);
-            label.transform.localPosition = new Vector3(0, 0.06f, 0);
-            var tmp = label.AddComponent<TMPro.TextMeshPro>();
-            tmp.text = "<color=#00E6D0>" + CHIP_NAME + "</color>";
-            tmp.fontSize = 0.05f;
-            tmp.alignment = TMPro.TextAlignmentOptions.Center;
-            tmp.enableWordWrapping = false;
+            // --- подпись над чипом (best-effort: TextMeshPro или GUI-текстура) ---
+            TryCreateChipLabel(chipGO);
 
             MelonLogger.Msg($"Bridge: создан предмет {CHIP_NAME} возле игрока.");
+        }
+
+        /// <summary>Добавляет компонент SLZ.Marrow.Marrows (поверхность захвата), если тип доступен.</summary>
+        private static void TryAddMarrowGrabSurface(GameObject go)
+        {
+            try
+            {
+                var t = System.Type.GetType("SLZ.Marrow.Marrows, Il2CppSLZ.Marrow");
+                if (t == null) t = typeof(Marrows); // fallback на прямой тип interop-сборки
+                var comp = go.AddComponent(t);
+                // немного увеличиваем зону захвата мелкого предмета
+                var f = t.GetField("m_CaptureScaleMultiplier");
+                if (f != null && comp != null) f.SetValue(comp, 1.6f);
+            }
+            catch (Exception e)
+            {
+                MelonLogger.Warning($"Bridge: Marrows не добавлен ({e.Message}) — чип всё равно физический объект с коллайдером, руки его возьмут.");
+            }
+        }
+
+        private static void TryCreateChipLabel(GameObject chipGO)
+        {
+            try
+            {
+                var labelGO = new GameObject("ChipLabel");
+                labelGO.transform.SetParent(chipGO.transform, false);
+                labelGO.transform.localPosition = new Vector3(0, 0.06f, 0);
+                var tmpType = System.Type.GetType("TMPro.TextMeshPro, Unity.TextMeshPro");
+                if (tmpType != null)
+                {
+                    var tmp = labelGO.AddComponent(tmpType);
+                    tmpType.GetProperty("text")?.SetValue(tmp, CHIP_NAME);
+                    return;
+                }
+                UnityEngine.Object.Destroy(labelGO);
+            }
+            catch { /* подпись не критична */ }
         }
     }
 }

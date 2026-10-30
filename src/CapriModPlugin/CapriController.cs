@@ -25,6 +25,7 @@ namespace CapriMod
 
         // === телекинез ===
         private Rigidbody _tkTarget;
+        private GameObject _tkHolder;      // holder с ConfigurableJoint (connectedBody = цель)
         private ConfigurableJoint _tkJoint;
         private bool _gripWasHeld;
         private float _telekinesisStartedAt;
@@ -149,21 +150,14 @@ namespace CapriMod
                 ReleaseTelekinesis();
             }
 
-            // цель «летит» к точке между рукой и взглядом
-            if (_tkTarget != null && _tkJoint != null)
+            // цель «летит» к точке между рукой и взглядом: holder без Rigidbody = точка в мире,
+            // joint тянет connectedBody (цель) к своему connectedAnchor
+            if (_tkTarget != null && _tkJoint != null && _tkHolder != null)
             {
                 Vector3 anchor = GetHandPosition() + GameBridge.ViewDirection * 0.9f;
-                _tkJoint.connectedAnchor = _tkJoint.connectedBody
-                    ? WorldToConnected(anchor)
-                    : anchor;
+                _tkHolder.transform.position = anchor;
+                _tkJoint.connectedAnchor = Vector3.zero;
             }
-        }
-
-        private Vector3 WorldToConnected(Vector3 world)
-        {
-            // connectedAnchor задаётся в локальных координатах connectedBody (тут — мир, body=null у joint-holder)
-            var holder = _tkJoint.GetComponentInParent<Transform>();
-            return holder != null ? holder.InverseTransformPoint(world) : world;
         }
 
         private Vector3 GetHandPosition()
@@ -199,9 +193,11 @@ namespace CapriMod
             _tkTarget = best;
             var go = new GameObject("CapriTKJoint");
             go.transform.position = best.position;
+            _tkHolder = go;
             _tkJoint = go.AddComponent<ConfigurableJoint>();
-            _tkJoint.autoConfigureConnectedJoint = true;
             _tkJoint.connectedBody = best;
+            _tkJoint.autoConfigureConnectedAnchor = false;
+            _tkJoint.connectedAnchor = Vector3.zero;
             _tkJoint.xMotion = ConfigurableJointMotion.Locked;
             _tkJoint.yMotion = ConfigurableJointMotion.Locked;
             _tkJoint.zMotion = ConfigurableJointMotion.Locked;
@@ -214,14 +210,13 @@ namespace CapriMod
                 positionDamping = Config.TelekinesisForce * 8f,
                 maximumForce = 2500f
             };
-            _tkJoint.targetJoint = _tkJoint;
-            _tkJoint.drive = s;
             _tkJoint.xDrive = s; _tkJoint.yDrive = s; _tkJoint.zDrive = s;
         }
 
         private void ReleaseTelekinesis()
         {
-            if (_tkJoint != null) Destroy(_tkJoint.gameObject);
+            if (_tkHolder != null) Destroy(_tkHolder);
+            _tkHolder = null;
             _tkJoint = null;
             _tkTarget = null;
         }
