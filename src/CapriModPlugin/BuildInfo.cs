@@ -1,5 +1,9 @@
 using MelonLoader;
 
+// ВАЖНО: атрибуты сборки идут ДО namespace (иначе ошибка CS1730)
+[assembly: MelonInfo(typeof(CapriMod.Main), "CapriMod", "1.0.0", "GameGleke", "https://github.com/GameGleke/BoneLabCapri")]
+[assembly: MelonGame("Steel Reign", "BONELAB")]
+
 namespace CapriMod
 {
     internal static class BuildInfo
@@ -11,7 +15,4 @@ namespace CapriMod
         public const string Version = "1.0.0";
         public const string DownloadLink = "https://github.com/GameGleke/BoneLabCapri";
     }
-
-    [assembly: MelonInfo(typeof(Main), BuildInfo.Name, BuildInfo.Version, BuildInfo.Author, BuildInfo.DownloadLink)]
-    [assembly: MelonGame("Steel Reign", "BONELAB")]
 }

@@ -23,6 +23,8 @@ namespace CapriMod
         public static float DamageRampPerSecond = 1.5f;// +за каждый секунду непрерывного удержания
         public static float DamageMax = 40f;           // потолок за тик
         public static float ScorchRange = 15f;         // дальность луча
+        public static float ScorchSelfDamageAfter = 4f;      // после скольких секунд удержания чип «перегружается» и бьёт носителя
+        public static float ScorchSelfDamageFraction = 0.25f;// доля урона, returning носителю
 
         public static void LoadOrCreate()
         {
@@ -55,7 +57,9 @@ namespace CapriMod
             $"  \"DamageBase\": {DamageBase},\n" +
             $"  \"DamageRampPerSecond\": {DamageRampPerSecond},\n" +
             $"  \"DamageMax\": {DamageMax},\n" +
-            $"  \"ScorchRange\": {ScorchRange}\n" +
+            $"  \"ScorchRange\": {ScorchRange},\n" +
+            $"  \"ScorchSelfDamageAfter\": {ScorchSelfDamageAfter},\n" +
+            $"  \"ScorchSelfDamageFraction\": {ScorchSelfDamageFraction}\n" +
             "}\n";
 
         /// <summary>Мини-парсер плоского JSON вида "key": value — без внешних зависимостей.</summary>
@@ -81,6 +85,8 @@ namespace CapriMod
                     case "DamageRampPerSecond": DamageRampPerSecond = f; break;
                     case "DamageMax": DamageMax = f; break;
                     case "ScorchRange": ScorchRange = f; break;
+                    case "ScorchSelfDamageAfter": ScorchSelfDamageAfter = f; break;
+                    case "ScorchSelfDamageFraction": ScorchSelfDamageFraction = f; break;
                 }
             }
         }

@@ -82,6 +82,28 @@ namespace CapriMod
         }
     }
 
+    /// <summary>Хук захвата предмета рукой — после AttachObject проверяем, не «вставляем» ли чип в голову.</summary>
+    [HarmonyPatch(typeof(Hand), "AttachObject")]
+    public static class HandAttachPatch
+    {
+        public static void Postfix(Hand __instance)
+        {
+            try
+            {
+                if (Main.Rig == null) return;
+                // только локальный игрок
+                var rm = __instance.GetComponentInParent<RigManager>();
+                if (rm != null && rm.Pointer != null && Main.Rig.Pointer != null &&
+                    rm.Pointer.IsEqualTo(Main.Rig.Pointer)) return; // не локальная рука
+                Bridge.NotifyHandAttachFromHook();
+            }
+            catch (Exception e)
+            {
+                MelonLogger.Error($"HandAttachPatch: {e}");
+            }
+        }
+    }
+
     /// <summary>Хук смерти игрока — Капри произносит прощальную реплику (паттерн BoneLib: Player_Health.Death).</summary>
     [HarmonyPatch(typeof(Player_Health), nameof(Player_Health.Death))]
     public static class PlayerDeathPatch

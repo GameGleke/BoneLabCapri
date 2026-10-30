@@ -7,69 +7,117 @@ using UnityEngine;
 namespace CapriMod
 {
     /// <summary>
-    /// «CHIP OF CAPRI» — чип-конструкт. Предмет, который экипируется в слот головного убора
-    /// (как в аниме: чип вставляется в голову). Пока надет — включает присутствие Капри,
-    /// телекинез и Scorch. Сняли — Капри исчезает с репликой прощания.
-    ///
-    /// Реализация: MonoBehavour, вешаемый на GameObject предмета. Игрок берёт чип руками,
-    /// подносит к голове — игра сама экипирует его в слот Headwear (у предмета есть
-    /// компонент EquippableSlot от BoneSmash/контента). Мы слушаем attach/detach через
-    /// BaseEquippable-события в Update-поллинге (надёжнее хуков на разных версиях игры).
+    /// «CHIP OF CAPRI» — чип-конструкт. Игрок берёт чип руками и подносит к голове
+    /// (как в аниме: чип вставляется в голову). Мы детектируем приближение к headpoint
+    /// и «вставляем» чип — цепляем его к голове через JointModule игры. Пока надет:
+    /// Капри активна, доступны телекинез и Scorch. Снял — Капри исчезает с репликой.
     /// </summary>
     public class CapriChip : MonoBehaviour
     {
-        // Barcode нашего контента (совпадает с JSON в ModContent/chip)
-        public const string BARCODE = "capri.chip.v1";
+        public static CapriChip Active { get; private set; }
 
-        [Header("Capri Chip")]
-        public bool IsChip = true;
+        /// <summary>Все существующие чипы (обычно один).</summary>
+        public static CapriChip[] AllChips = Array.Empty<CapriChip>();
 
-        private Transform _headAttachPoint;      // точка крепления на голове игрока
-        private bool _wasEquipped;
-        private float _lastStateCheck;
+        public bool IsEquipped { get; private set; }
+
+        private const float EQUIP_DISTANCE = 0.18f;   // насколько близко к голове надо поднести
+        private const float UNEQUIP_PULL   = 0.45f;   // на сколько оттянуть, чтобы вынуть
+
+        private float _lastCheck;
+        private int _equipCooldownFrames;
 
         private void OnEnable()
         {
-            // Подстраховка: если предмет уже был где-то прицеплен после загрузки уровня
-            _wasEquipped = false;
+            Active = this;
+            RebuildAll();
         }
+
+        private void Start() => RebuildAll();
+
+        private static void RebuildAll()
+        {
+            var found = GameObject.FindObjectsOfType<CapriChip>();
+            if (found.Length > 0) AllChips = found;
+        }
+
+        private bool _stickyMode;   // fallback: держим чип у головы kinematic-привязкой
+
+        public void SetStickyMode(bool on) => _stickyMode = on;
 
         private void Update()
         {
-            // Проверяем состояние раз в 0.15 c (attach к голове = equipped)
-            if (Time.time - _lastStateCheck < 0.15f) return;
-            _lastStateCheck = Time.time;
-
-            bool equipped = IsEquippedOnHead();
-            if (equipped == _wasEquipped) return;
-            _wasEquipped = equipped;
-
-            if (equipped)
+            // Sticky-fallback: прижимаем позицию к голове каждый кадр
+            if (_stickyMode && IsEquipped)
             {
-                MelonLogger.Msg("CapriMod: чип Капри установлен в голову.");
-                CapriController.OnChipEquipped(this);
+                transform.position = GameBridge.HeadPosition + new Vector3(0.02f, 0.075f, 0.02f);
             }
-            else
+
+            // Пассивная проверка раз в ~0.3 c (основной триггер — хук AttachObject)
+            if (Time.time - _lastCheck < 0.3f) return;
+            _lastCheck = Time.time;
+            Evaluate();
+        }
+
+        /// <summary>Вызывается из Mono-потока после хука Hand.AttachObject.</summary>
+        public static void CheckProximityToHead()
+        {
+            foreach (var chip in AllChips)
+                if (chip != null) chip.Evaluate();
+        }
+
+        private void Evaluate()
+        {
+            if (_equipCooldownFrames > 0) { _equipCooldownFrames--; return; }
+            if (Main.Rig == null || Main.Rig.m_Headpoint == null) return;
+
+            float dist = Vector3.Distance(transform.position, GameBridge.HeadPosition);
+
+            if (!IsEquipped && dist < EQUIP_DISTANCE)
             {
-                MelonLogger.Msg("CapriMod: чип Капри снят.");
-                CapriController.OnChipRemoved();
+                Equip();
+            }
+            else if (IsEquipped && dist > UNEQUIP_PULL)
+            {
+                Unequip();
             }
         }
 
-        /// <summary>Чип «в голове», если он прикреплён к точке экипировки RigManager-а.</summary>
-        private bool IsEquippedOnHead()
+        private void Equip()
         {
-            var rig = Main.Rig;
-            if (rig == null || rig.m_Headpoint == null) return false;
-            _headAttachPoint ??= rig.m_Headpoint.transform;
-            // При экипировке предмет становится child'ом точки головы
-            return transform.parent != null &&
-                   (transform.parent == _headAttachPoint || transform.parent.IsChildOf(_headAttachPoint));
+            if (GameBridge.EquipChipToHead(gameObject))
+            {
+                IsEquipped = true;
+                Active = this;
+                MelonLogger.Msg("CapriMod: чип Капри установлен в голову.");
+                CapriController.OnChipEquipped(this);
+            }
+        }
+
+        private void Unequip()
+        {
+            IsEquipped = false;
+            _stickyMode = false;
+            GameBridge.UnequipChip(gameObject);
+            // освобождаем от руки, чтобы чип упал физически
+            try { GetComponent<Rigidbody>().isKinematic = false; } catch { }
+            _equipCooldownFrames = 20; // не «вставлять» обратно сразу
+            MelonLogger.Msg("CapriMod: чип Капри снят.");
+            CapriController.OnChipRemoved();
+        }
+
+        /// <summary>Программное снятие (например, при смерти/выходе из сцены).</summary>
+        public void ForceUnequip()
+        {
+            if (IsEquipped) Unequip();
         }
 
         private void OnDestroy()
         {
-            if (_wasEquipped) CapriController.OnChipRemoved();
+            if (Active == this) Active = null;
+            bool wasEquipped = IsEquipped;
+            IsEquipped = false;
+            if (wasEquipped) CapriController.OnChipRemoved();
         }
     }
 }

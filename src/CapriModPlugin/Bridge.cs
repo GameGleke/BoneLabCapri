@@ -20,6 +20,7 @@ namespace CapriMod
 
         // очередь событий из Harmony-хуков (IL2CPP-поток) -> Main.OnUpdate (Mono-поток)
         private static volatile bool _deathFlag;
+        private static volatile bool _handAttachFlag;
         private static RigManager _pendingLocalRig;
         private static float _ensureChipRequestedAt = -1f;
 
@@ -36,6 +37,9 @@ namespace CapriMod
         /// <summary>Из хука PlayerMarker: передаём локальный rig в Mono-поток.</summary>
         public static void NotifyPlayerSpawnFromHook(RigManager rig) => _pendingLocalRig = rig;
 
+        /// <summary>Из хука Hand.AttachObject: предмет «прилип» к руке — ставим флаг для Mono-потока.</summary>
+        public static void NotifyHandAttachFromHook() => _handAttachFlag = true;
+
         /// <summary>Из хука Player_Health.Death: ставим флаг (не трогаем Mono-объекты!).</summary>
         public static void NotifyDeathFromHook() => _deathFlag = true;
 
@@ -49,11 +53,14 @@ namespace CapriMod
             {
                 var rig = _pendingLocalRig;
                 _pendingLocalRig = null;
-                Main.Rig = rig;
-                Main.LeftHand = rig.leftHand;
-                Main.RightHand = rig.rightHand;
+                GameBridge.SetLocalRig(rig);
                 EnsureChipInScene();
                 MelonLogger.Msg("Bridge: локальный игрок закеширован, чип проверен.");
+            }
+            if (_handAttachFlag)
+            {
+                _handAttachFlag = false;
+                CapriChip.CheckProximityToHead(); // Mono-поток: проверяем, не «вставляем» ли чип
             }
             if (_deathFlag)
             {
@@ -71,7 +78,7 @@ namespace CapriMod
 
         // ================= ФАБРИКА ЧИПА =================
         // Мод сам создаёт предмет «CHIP OF CAPRI» при загрузке уровня —
-        // все ассеты (модель-примитив, озвучка, логика) уже внутри DLL.
+        // все ассеты внутри DLL, отдельных папок не нужно.
 
         private const string CHIP_NAME = "CHIP OF CAPRI";
 
@@ -79,7 +86,7 @@ namespace CapriMod
         {
             try
             {
-                if (UnityEngine.Object.FindObjectOfType<CapriChip>() != null) return; // уже есть
+                if (CapriChip.Active != null) return; // уже есть
                 SpawnChipNearPlayer();
             }
             catch (Exception e)
@@ -92,7 +99,7 @@ namespace CapriMod
         {
             var rig = Main.Rig;
             if (rig == null) return;
-            Vector3 pos = rig.transform.position + new Vector3(0.8f, 1.05f, 0.4f);
+            Vector3 pos = GameBridge.HeadPosition + new Vector3(0.8f, 0.2f, 0.4f);
 
             // --- тело чипа: маленький «кибернетический имплант» ---
             var chipGO = GameObject.CreatePrimitive(PrimitiveType.Cube);
@@ -106,17 +113,18 @@ namespace CapriMod
             mat.SetColor("_EmissionColor", new Color(0.05f, 0.5f, 0.45f));
             chipGO.GetComponent<Renderer>().material = mat;
 
-            // --- физика, чтобы игрушку можно было взять ---
+            // --- физика, чтобы игрушку можно было взять руками ---
             var rb = chipGO.AddComponent<Rigidbody>();
             rb.mass = 0.15f;
             var marrows = chipGO.AddComponent<Marrows>();       // поверхность захвата (SLZ.Marrow)
-            marrows.m_CaptureScaleMultiplier = 1.5f;
+            marrows.m_CaptureScaleMultiplier = 1.6f;
 
-            // --- экипируемость: слот Headwear (чип «в голову», как у Санки) ---
-            var slot = chipGO.AddComponent<EquippableSlot>();   // SLZ.Marrow.EquippableSlot
-            slot.m_EquippableLayerMask = LayerMask.GetMask("Default");
-            try { SetSlotTypeHeadwear(slot); }
-            catch (Exception e) { MelonLogger.Warning($"EquippableSlot type: {e.Message}"); }
+            // --- зона взаимодействия: поднёс к голове -> «вставил чип» ---
+            var inter = chipGO.AddComponent<InteractTrigger>();
+            inter.m_MaxGrabDistance = 0.35f;
+            inter.m_LocalPosition = new Vector3(0, 0, 0);
+            inter.m_LocalRotation = Quaternion.identity;
+            inter.m_InteractLayerMask = LayerMask.GetMask("Headpoint");
 
             // --- наш скрипт-чип ---
             chipGO.AddComponent<CapriChip>();
@@ -126,32 +134,12 @@ namespace CapriMod
             label.transform.SetParent(chipGO.transform, false);
             label.transform.localPosition = new Vector3(0, 0.06f, 0);
             var tmp = label.AddComponent<TMPro.TextMeshPro>();
-            tmp.text = $"<color=#00E6D0>{CHIP_NAME}</color>";
+            tmp.text = "<color=#00E6D0>" + CHIP_NAME + "</color>";
             tmp.fontSize = 0.05f;
             tmp.alignment = TMPro.TextAlignmentOptions.Center;
             tmp.enableWordWrapping = false;
 
             MelonLogger.Msg($"Bridge: создан предмет {CHIP_NAME} возле игрока.");
-        }
-
-        private static void SetSlotTypeHeadwear(EquippableSlot slot)
-        {
-            // enum-поле m_SlotType: ищем значение Headwear рефлексией (enum может быть приватным в interop)
-            var field = typeof(EquippableSlot).GetField("m_SlotType",
-                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic |
-                System.Reflection.BindingFlags.Public);
-            if (field == null) return;
-            var enumType = field.FieldType;               // Il2CppEnum => struct-подобный
-            foreach (var name in Enum.GetNames(enumType))
-            {
-                if (name.Equals("Headwear", StringComparison.OrdinalIgnoreCase) ||
-                    name.Equals("Hat", StringComparison.OrdinalIgnoreCase))
-                {
-                    object val = Enum.Parse(enumType, name);
-                    field.SetValue(slot, val);
-                    break;
-                }
-            }
         }
     }
 }

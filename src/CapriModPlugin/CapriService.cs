@@ -67,14 +67,17 @@ namespace CapriMod
         }
 
         /// <summary>Случайная точка появления рядом с игроком (рандомное место, как в запросе).</summary>
-        public static Vector3 RandomSpawnPointNear(Transform camTf, float minDist = 2.5f, float maxDist = 6f)
+        public static Vector3 RandomSpawnPointNear(float minDist = 2.5f, float maxDist = 6f)
         {
-            Vector3 center = camTf.position;
+            Vector3 center = GameBridge.HeadPosition;
+            Vector3 fwd = GameBridge.ViewDirection; fwd.y = 0; fwd.Normalize();
             for (int i = 0; i < 8; i++)
             {
-                float ang = UnityEngine.Random.Range(0f, Mathf.PI * 2f);
+                // преимущественно перед игроком (как в аниме — она materializes на виду), но в случайной стороне
+                float ang = UnityEngine.Random.Range(-2.4f, 2.4f);
                 float dist = UnityEngine.Random.Range(minDist, maxDist);
-                Vector3 p = center + new Vector3(Mathf.Cos(ang) * dist, UnityEngine.Random.Range(-0.5f, 1.8f), Mathf.Sin(ang) * dist);
+                Vector3 dir = Quaternion.Euler(0f, Mathf.Rad2Deg * ang, 0f) * fwd;
+                Vector3 p = center + new Vector3(dir.x * dist, UnityEngine.Random.Range(-0.5f, 1.8f), dir.z * dist);
                 // Пытаемся поставить на пол
                 if (Physics.Raycast(p + Vector3.up * 2f, Vector3.down, out var hit, 4f))
                 {
@@ -83,7 +86,7 @@ namespace CapriMod
                 // Не слишком близко к лицу
                 if ((p - center).sqrMagnitude > minDist * minDist) return p;
             }
-            return center + camTf.forward * minDist;
+            return center + fwd * minDist;
         }
     }
 }

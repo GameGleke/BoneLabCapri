@@ -33,7 +33,6 @@ namespace CapriMod
         private bool _triggerWasHeld;
         private float _scorchHoldStart = -1f;
         private float _lastDamageTick;
-        private Transform _scorchTarget;
         private LineRenderer _beam;
 
         // ================= чип =================
@@ -74,12 +73,11 @@ namespace CapriMod
         private void Update()
         {
             if (!ChipEquipped || Main.Rig == null) return;
-            var camTf = Camera.main != null ? Camera.main.transform : Main.Rig.m_Headpoint.transform;
 
             // --- появления в случайных местах ---
             if (!_entityOut && Time.time >= _nextSpawnTime)
             {
-                Vector3 p = CapriService.RandomSpawnPointNear(camTf);
+                Vector3 p = CapriService.RandomSpawnPointNear();
                 var e = CapriEntity.Spawn(p, Quaternion.identity);
                 CapriService.Speak(VoiceBank.Category.Spawn, e.VoiceAnchor);
                 _entityOut = true;
@@ -101,32 +99,21 @@ namespace CapriMod
             }
 
             // --- способности ---
-            HandleTelekinesis(camTf);
-            HandleScorch(camTf);
+            HandleTelekinesis();
+            HandleScorch();
         }
 
         private InputState ReadRightController()
         {
-            // Основной путь — игровые Hand-компоненты (учитывают калибровку игры).
-            // ВАЖНО: Controller/Hand — Il2Cpp-объекты; читаем только простые float-поля,
-            // это безопасно из Mono-потока MelonUpdate.
-            var hand = Main.RightHand ?? Main.LeftHand;
-            if (hand != null)
-            {
-                try
-                {
-                    var c = hand.m_Controller as BaseController;
-                    if (c != null)
-                        return new InputState(c.m_GripAxis > 0.6f, c.m_TriggerAxis > 0.75f);
-                }
-                catch { /* межверсионные различия — падаем в XR fallback */ }
-            }
+            // Основной путь — игровые Hand/BaseController через GameBridge (изолирует IL2CPP).
+            if (GameBridge.ReadControllerAxes(out float g, out float t))
+                return new InputState(g > 0.6f, t > 0.75f);
             // Fallback напрямую из XR (чистый UnityEngine.XR — всегда совместим)
-            var dev = InputDevices.GetDeviceAtXRNode(XRNode.RightHand);
-            if (!dev.isValid) dev = InputDevices.GetDeviceAtXRNode(XRNode.LeftHand);
+            var dev = UnityEngine.XR.InputDevices.GetDeviceAtXRNode(UnityEngine.XR.XRNode.RightHand);
+            if (!dev.isValid) dev = UnityEngine.XR.InputDevices.GetDeviceAtXRNode(UnityEngine.XR.XRNode.LeftHand);
             bool grip = false, trig = false;
-            if (dev.TryGetFeatureValue(CommonUsages.gripButton, out bool gb)) grip = gb;
-            if (dev.TryGetFeatureValue(CommonUsages.triggerButton, out bool tb)) trig = tb;
+            if (dev.TryGetFeatureValue(UnityEngine.XR.CommonUsages.gripButton, out bool gb)) grip = gb;
+            if (dev.TryGetFeatureValue(UnityEngine.XR.CommonUsages.triggerButton, out bool tb)) trig = tb;
             return new InputState(grip, trig);
         }
 
@@ -137,7 +124,7 @@ namespace CapriMod
         }
 
         // ================= ТЕЛЕКИНЕЗ =================
-        private void HandleTelekinesis(Transform camTf)
+        private void HandleTelekinesis()
         {
             var st = ReadRightController();
 
@@ -145,7 +132,7 @@ namespace CapriMod
             {
                 _gripWasHeld = true;
                 _lastPlayerActionTime = Time.time;
-                TryGrabNearestRigidbody(camTf);
+                TryGrabNearestRigidbody();
                 if (_tkTarget != null)
                 {
                     _telekinesisStartedAt = Time.time;
@@ -165,7 +152,7 @@ namespace CapriMod
             // цель «летит» к точке между рукой и взглядом
             if (_tkTarget != null && _tkJoint != null)
             {
-                Vector3 anchor = GetHandPosition() + camTf.forward * 0.9f;
+                Vector3 anchor = GetHandPosition() + GameBridge.ViewDirection * 0.9f;
                 _tkJoint.connectedAnchor = _tkJoint.connectedBody
                     ? WorldToConnected(anchor)
                     : anchor;
@@ -181,15 +168,19 @@ namespace CapriMod
 
         private Vector3 GetHandPosition()
         {
-            var hand = Main.RightHand;
-            if (hand != null && hand.m_Controller != null) return hand.m_Controller.transform.position;
-            if (Main.Rig?.rightHand?.transform != null) return Main.Rig.rightHand.transform.position;
-            return Camera.main != null ? Camera.main.transform.position : Vector3.zero;
+            try
+            {
+                var hand = Main.RightHand ?? Main.LeftHand;
+                if (hand != null && hand.transform != null) return hand.transform.position;
+            }
+            catch { /* межпоточная/версионная проблема — падаем на голову */ }
+            return GameBridge.HeadPosition;
         }
 
-        private void TryGrabNearestRigidbody(Transform from)
+        private void TryGrabNearestRigidbody()
         {
-            Collider[] hits = Physics.OverlapSphere(from.position, Config.TelekinesisRange);
+            Vector3 from = GameBridge.ViewOrigin;
+            Collider[] hits = Physics.OverlapSphere(from, Config.TelekinesisRange);
             Rigidbody best = null;
             float bestDist = float.MaxValue;
             foreach (var col in hits)
@@ -200,7 +191,7 @@ namespace CapriMod
                 // не хватаем части тела игрока и сам чип
                 if (rb.GetComponentInParent<RigManager>() != null) continue;
                 if (rb.GetComponentInParent<CapriChip>() != null) continue;
-                float d = Vector3.Distance(from.position, rb.position);
+                float d = Vector3.Distance(from, rb.position);
                 if (d < bestDist) { bestDist = d; best = rb; }
             }
             if (best == null) return;
@@ -236,7 +227,7 @@ namespace CapriMod
         }
 
         // ================= SCORCH (урон по фокусу) =================
-        private void HandleScorch(Transform camTf)
+        private void HandleScorch()
         {
             var st = ReadRightController();
 
@@ -245,8 +236,8 @@ namespace CapriMod
                 _triggerWasHeld = true;
                 _scorchHoldStart = Time.time;
                 _lastDamageTick = 0f;
-                FindScorchTarget(camTf);
-                if (_scorchTarget != null)
+                FindScorchTarget();
+                if (_scorchTargetGO != null)
                     CapriService.Speak(VoiceBank.Category.Attack, CapriEntity.Instance?.VoiceAnchor);
                 EnsureBeam();
             }
@@ -254,14 +245,14 @@ namespace CapriMod
             {
                 // удержание: периодический урон, растущий со временем
                 float hold = Time.time - _scorchHoldStart;
-                if (_scorchTarget == null) FindScorchTarget(camTf);
-                if (_scorchTarget != null && Time.time - _lastDamageTick >= Config.DamageTickInterval)
+                if (_scorchTargetGO == null) FindScorchTarget();
+                if (_scorchTargetGO != null && Time.time - _lastDamageTick >= Config.DamageTickInterval)
                 {
                     _lastDamageTick = Time.time;
                     float dmg = Mathf.Min(Config.DamageBase + Config.DamageRampPerSecond * hold, Config.DamageMax);
-                    DealDamage(_scorchTarget, dmg);
+                    ApplyScorchDamage(dmg);
                 }
-                UpdateBeam(camTf);
+                UpdateBeam();
             }
             else if (!st.Trigger && _triggerWasHeld)
             {
@@ -270,74 +261,27 @@ namespace CapriMod
             }
         }
 
-        private void FindScorchTarget(Transform camTf)
+        private GameObject _scorchTargetGO;
+
+        private void FindScorchTarget()
         {
-            _scorchTarget = null;
-            if (Physics.Raycast(camTf.position, camTf.forward, out var hit, Config.ScorchRange))
-            {
-                // цель — NPC или другой rig (кто угодно с RigManager/AIBrain), но не сам игрок
-                var rm = hit.collider.GetComponentInParent<RigManager>();
-                if (rm != null && rm != Main.Rig)
-                {
-                    _scorchTarget = rm.transform;
-                    return;
-                }
-                // Марро-цель без rig'а — всё равно бьём по хиту, если у него есть жёсткость здоровья
-                var hp = hit.collider.GetComponentInParent<Player_Health>();
-                if (hp != null) { _scorchTarget = hp.transform; return; }
-            }
+            GameBridge.FindLookTarget(Config.ScorchRange, out _scorchTargetGO);
         }
 
-        /// <summary>Урон цели. Ищем компонент здоровья (NPC Health / Player_Health) и наносим урон.
-        /// Рефлексия по IL2CPP-методам — чтобы работать на разных версиях игры без жёсткой привязки
-        /// к сигнатуре TAKEDAMAGE.</summary>
-        private void DealDamage(Transform target, float amount)
+        /// <summary>Периодический урон цели + физический толчок (визуальный фидбек scorch).</summary>
+        private void ApplyScorchDamage(float dmg)
         {
-            if (target == null) return;
-
-            // 1) NPC: SLZ.Marrow.NPCHealth.TAKEDAMAGE(...)
-            var npc = target.GetComponent<Il2CppSLZ.Marrow.NPCHealth>();
-            if (npc != null && TryInvokeTake(npc, amount)) return;
-
-            // 2) Игрок/аватар: SLZ.Bonelab.Player_Health.TAKEDAMAGE(...)
-            var ph = target.GetComponent<Player_Health>();
-            if (ph != null && TryInvokeTake(ph, amount)) return;
-
-            // 3) Универсальный запасной путь — физический импульс (визуальный эффект)
-            var rb = target.GetComponentInChildren<Rigidbody>();
-            if (rb != null) rb.AddExplosionForce(amount * 40f, rb.position, 3f);
-        }
-
-        private static bool TryInvokeTake(object healthComp, float amount)
-        {
-            try
+            if (_scorchTargetGO == null) return;
+            var health = GameBridge.GetHealthComponent(_scorchTargetGO, out string kind);
+            bool dealt = health != null && GameBridge.TakeDamage(health, dmg, GameBridge.ViewDirection);
+            GameBridge.ApplyPhysicalPush(_scorchTargetGO, dealt ? dmg : dmg * 0.5f);
+            // перегрузка чипа бьёт и по носителю: при долгом удержании (>4 c) — самоповреждение, как в аниме
+            float hold = Time.time - _scorchHoldStart;
+            if (hold > Config.ScorchSelfDamageAfter && kind != null)
             {
-                var type = healthComp.GetType(); // Il2CppSystem type через interop
-                foreach (var m in type.GetMethods())
-                {
-                    if (!string.Equals(m.Name, "TAKEDAMAGE", System.StringComparison.OrdinalIgnoreCase)) continue;
-                    var ps = m.GetParameters();
-                    if (ps.Length == 0) continue;
-                    if (ps[0].ParameterType != typeof(float)) continue;
-
-                    var args = new object[ps.Length];
-                    args[0] = amount;
-                    for (int i = 1; i < ps.Length; i++)
-                    {
-                        var pt = ps[i].ParameterType;
-                        if (pt == typeof(bool)) args[i] = true;                 // damageDirection/etc
-                        else if (pt.IsEnum) args[i] = System.Activator.CreateInstance(pt); // Physical/Pure
-                        else args[i] = null;                                    // ссылки (Transform/Vector?)
-                    }
-                    m.Invoke(healthComp, args);
-                    return true;
-                }
+                var self = GameBridge.LocalPlayerHealth();
+                if (self != null) GameBridge.TakeDamage(self, dmg * Config.ScorchSelfDamageFraction, Vector3.up);
             }
-            catch (System.Exception e)
-            {
-                MelonLogger.Warning($"DealDamage({healthComp?.GetType().Name}): {e.Message}");
-            }
-            return false;
         }
 
         private void EnsureBeam()
@@ -353,24 +297,25 @@ namespace CapriMod
             _beam.enabled = false;
         }
 
-        private void UpdateBeam(Transform camTf)
+        private void UpdateBeam()
         {
             if (_beam == null) return;
-            if (_scorchTarget == null) { _beam.enabled = false; return; }
+            if (_scorchTargetGO == null) { _beam.enabled = false; return; }
             _beam.enabled = true;
-            Vector3 head = Main.Rig != null && Main.Rig.m_Headpoint != null
-                ? Main.Rig.m_Headpoint.transform.position + camTf.forward * 0.15f
-                : camTf.position;
-            Vector3 tgt = _scorchTarget.position + Vector3.up * 1.2f;
-            // дрожание луча
-            tgt += UnityEngine.Random.insideUnitSphere * 0.06f;
-            _beam.SetPosition(0, head);
-            _beam.SetPosition(1, tgt);
+            Vector3 head = GameBridge.ViewOrigin + GameBridge.ViewDirection * 0.15f;
+            try
+            {
+                Vector3 tgt = _scorchTargetGO.transform.position + Vector3.up * 1.2f;
+                tgt += UnityEngine.Random.insideUnitSphere * 0.06f; // дрожание луча
+                _beam.SetPosition(0, head);
+                _beam.SetPosition(1, tgt);
+            }
+            catch { _beam.enabled = false; }
         }
 
         private void EndScorch()
         {
-            _scorchTarget = null;
+            _scorchTargetGO = null;
             _scorchHoldStart = -1f;
             if (_beam != null) _beam.enabled = false;
         }
