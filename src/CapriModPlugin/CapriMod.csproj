@@ -1,0 +1,89 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>CapriMod</AssemblyName>
+    <RootNamespace>CapriMod</RootNamespace>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <!-- BONELAB_DIR: путь к папке с BONELAB.exe (без слэша на конце) -->
+    <BonelabDir Condition="'$(BonelabDir)' == ''">$(BONELAB_DIR)</BonelabDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- MelonLoader / Harmony / Il2CppInterop -->
+    <Reference Include="MelonLoader">
+      <HintPath>$(BonelabDir)\MelonLoader\net6\MelonLoader.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(BonelabDir)\MelonLoader\net6\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2CppInterop.Common">
+      <HintPath>$(BonelabDir)\MelonLoader\net6\Il2CppInterop.Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2CppInterop.Runtime">
+      <HintPath>$(BonelabDir)\MelonLoader\net6\Il2CppInterop.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!-- Игровые сборки (IL2CPP interop) -->
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(BonelabDir)\MelonLoader\Il2CppAssemblies\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2CppSLZ.Marrow">
+      <HintPath>$(BonelabDir)\MelonLoader\Il2CppAssemblies\Il2CppSLZ.Marrow.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2CppSLZ.Bonelab">
+      <HintPath>$(BonelabDir)\MelonLoader\Il2CppAssemblies\Il2CppSLZ.Bonelab.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2CppMarrowMods">
+      <HintPath>$(BonelabDir)\MelonLoader\Il2CppAssemblies\Il2CppMarrowMods.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!-- Unity -->
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(BonelabDir)\MelonLoader\Il2CppAssemblies\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.AudioModule">
+      <HintPath>$(BonelabDir)\MelonLoader\Il2CppAssemblies\UnityEngine.AudioModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>$(BonelabDir)\MelonLoader\Il2CppAssemblies\UnityEngine.PhysicsModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.XRModule">
+      <HintPath>$(BonelabDir)\MelonLoader\Il2CppAssemblies\UnityEngine.XRModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(BonelabDir)\MelonLoader\Il2CppAssemblies\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.TextMeshPro">
+      <HintPath>$(BonelabDir)\MelonLoader\Il2CppAssemblies\Unity.TextMeshPro.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Все WAV-файлы озвучки встраиваются в DLL мода — мод ставится одним файлом -->
+  <ItemGroup>
+    <EmbeddedResource Include="Audio\*.wav" />
+    <EmbeddedResource Include="Audio\manifest.txt" LogicalName="CapriMod.Audio.manifest.txt" />
+  </ItemGroup>
+
+  <!-- Автосборка в Mods/ игры при наличии BONELAB_DIR -->
+  <Target Name="CopyToGame" AfterTargets="Build" Condition="Exists('$(BonelabDir)')">
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(BonelabDir)\Mods" SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>
