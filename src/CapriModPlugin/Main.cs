@@ -28,7 +28,7 @@ namespace CapriMod
         // Кэш игрока (заполняется через Bridge из хука PlayerMarker)
         internal static RigManager Rig;
         internal static Hand LeftHand, RightHand;
-        internal static bool PlayerReady => Rig != null && Rig.m_Headpoint != null;
+        internal static bool PlayerReady => Rig != null && GameBridge.FindHeadpoint() != null;
 
         public override void OnInitializeMelon()
         {
@@ -49,12 +49,13 @@ namespace CapriMod
             else
             {
                 // Чип должен появиться на новых песочницах/уровнях
-                Bridge.EnsureChipInSceneDelayed();
+                Bridge.EnsureChipRequested();
             }
         }
 
         public override void OnUpdate()
         {
+            PlayerLocator.Tick();
             Bridge.ProcessFlags();
 #if DEBUG
             if (Input.GetKeyDown(KeyCode.F12))
@@ -63,26 +64,43 @@ namespace CapriMod
         }
     }
 
-    /// <summary>Хук спавна локального игрока — паттерн BoneLib (PlayerMarker.OnPlayerSpawned).</summary>
-    [HarmonyPatch(typeof(PlayerMarker), nameof(PlayerMarker.OnPlayerSpawned))]
-    public static class PlayerSpawnPatch
+    /// <summary>
+    /// Детект локального RigManager — БЕЗ Harmony-хуков и приватных полей (m_Local/m_RigManager
+    /// отсутствуют в некоторых версиях interop-сборок → CS1061). Опрашиваем rig из Mono-потока
+    /// (Melon OnUpdate работает на main thread игры, как в BoneLib Hooking.cs).
+    /// </summary>
+    internal static class PlayerLocator
     {
-        public static void Postfix(PlayerMarker __instance)
+        private static float _nextScan = -1f;
+        private static bool _spawnNotified;
+
+        public static void Tick()
         {
-            try
+            // rig ещё не найден — сканируем раз в секунду
+            if (Main.Rig == null || !Main.Rig.gameObject.activeInHierarchy)
             {
-                if (__instance.m_RigManager == null) return;
-                if (!__instance.m_Local) return;      // только локальный VR-игрок
-                Bridge.NotifyPlayerSpawnFromHook(__instance.m_RigManager);
+                if (Time.time < _nextScan) return;
+                _nextScan = Time.time + 1f;
+                RigManager found = UnityEngine.Object.FindObjectOfType<RigManager>();
+                if (found != null && found.gameObject.activeInHierarchy)
+                {
+                    GameBridge.SetLocalRig(found);
+                    Bridge.EnsureChipRequested();
+                    MelonLogger.Msg("PlayerLocator: локальный RigManager закеширован.");
+                }
+                return;
             }
-            catch (Exception e)
+            // rig есть — как только голова найдена, запрашиваем чип (многократный вызов безопасен)
+            if (!_spawnNotified && GameBridge.FindHeadpoint() != null)
             {
-                MelonLogger.Error($"PlayerSpawnPatch: {e}");
+                _spawnNotified = true;
+                Bridge.EnsureChipRequested();
             }
         }
     }
 
-    /// <summary>Хук захвата предмета рукой — после AttachObject проверяем, не «вставляем» ли чип в голову.</summary>
+    /// <summary>Хук захвата предмета рукой — после AttachObject проверяем, не «вставляем» ли чип в голову.
+    /// Только публичные API (BoneLib-паттерн), никаких приватных полей.</summary>
     [HarmonyPatch(typeof(Hand), "AttachObject")]
     public static class HandAttachPatch
     {
@@ -91,11 +109,7 @@ namespace CapriMod
             try
             {
                 if (Main.Rig == null) return;
-                // только локальный игрок
-                var rm = __instance.GetComponentInParent<RigManager>();
-                if (rm != null && rm.Pointer != null && Main.Rig.Pointer != null &&
-                    rm.Pointer.IsEqualTo(Main.Rig.Pointer)) return; // не локальная рука
-                Bridge.NotifyHandAttachFromHook();
+                Bridge.NotifyHandAttachFromHook(); // проверка «локальности» — уже в Mono-потоке
             }
             catch (Exception e)
             {

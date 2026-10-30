@@ -1,4 +1,5 @@
 using System;
+using System.Reflection;
 using Il2CppSLZ.Bonelab;
 using Il2CppSLZ.Marrow;
 using MelonLoader;
@@ -21,7 +22,6 @@ namespace CapriMod
         // очередь событий из Harmony-хуков (IL2CPP-поток) -> Main.OnUpdate (Mono-поток)
         private static volatile bool _deathFlag;
         private static volatile bool _handAttachFlag;
-        private static RigManager _pendingLocalRig;
         private static float _ensureChipRequestedAt = -1f;
 
         /// <summary>Вызывается из Main.OnInitializeMelon (Mono-поток).</summary>
@@ -34,29 +34,22 @@ namespace CapriMod
             MelonLogger.Msg("Bridge: runner создан.");
         }
 
-        /// <summary>Из хука PlayerMarker: передаём локальный rig в Mono-поток.</summary>
-        public static void NotifyPlayerSpawnFromHook(RigManager rig) => _pendingLocalRig = rig;
-
         /// <summary>Из хука Hand.AttachObject: предмет «прилип» к руке — ставим флаг для Mono-потока.</summary>
         public static void NotifyHandAttachFromHook() => _handAttachFlag = true;
 
         /// <summary>Из хука Player_Health.Death: ставим флаг (не трогаем Mono-объекты!).</summary>
         public static void NotifyDeathFromHook() => _deathFlag = true;
 
-        /// <summary>Запросить чип после загрузки уровня (из OnSceneWasLoaded — тоже Mono-поток Melon).</summary>
-        public static void EnsureChipInSceneDelayed() => _ensureChipRequestedAt = Time.time;
+        /// <summary>Запросить чип после загрузки уровня / спавна игрока. Вызывается только с main thread игры.</summary>
+        public static void EnsureChipRequested()
+        {
+            try { _ensureChipRequestedAt = Time.time; }
+            catch { _ensureChipRequestedAt = Environment.TickCount / 1000f; }
+        }
 
         /// <summary>Вызывается из Main.OnUpdate (Mono-поток).</summary>
         public static void ProcessFlags()
         {
-            if (_pendingLocalRig != null)
-            {
-                var rig = _pendingLocalRig;
-                _pendingLocalRig = null;
-                GameBridge.SetLocalRig(rig);
-                EnsureChipInScene();
-                MelonLogger.Msg("Bridge: локальный игрок закеширован, чип проверен.");
-            }
             if (_handAttachFlag)
             {
                 _handAttachFlag = false;
@@ -67,7 +60,7 @@ namespace CapriMod
                 _deathFlag = false;
                 _controller?.NotifyPlayerDeath();
             }
-            // На новых сценах спавним чип чуть позже, когда rig уже готов
+            // Спавним чип чуть позже, когда rig уже готов
             if (_ensureChipRequestedAt > 0 && Main.PlayerReady &&
                 Time.time - _ensureChipRequestedAt > 1.5f)
             {
@@ -117,54 +110,66 @@ namespace CapriMod
             var rb = chipGO.AddComponent<Rigidbody>();
             rb.mass = 0.15f;
 
-            // Поверхность захвата Marrow (Marrows). Создаём компонент рефлексией:
-            // имя/тип в IL2CPP-сборке может отличаться между версиями игры.
-            TryAddMarrowGrabSurface(chipGO);
+            // Поверхность захвата Marrow: добавляем НЕ напрямую (Marrows требует
+            // прокинутых serialized-полей — NRE на Awake), а копированием с готового
+            // предмета в сцене. Если скопировать нечего — чип остаётся обычным
+            // физическим объектом с коллайдером: руки BoneLab берут и такие.
+            TryCopyGrabSurface(chipGO);
 
             // --- наш скрипт-чип: детект «вставки в голову» по дистанции ---
             chipGO.AddComponent<CapriChip>();
 
-            // --- подпись над чипом (best-effort: TextMeshPro или GUI-текстура) ---
-            TryCreateChipLabel(chipGO);
-
             MelonLogger.Msg($"Bridge: создан предмет {CHIP_NAME} возле игрока.");
         }
 
-        /// <summary>Добавляет компонент SLZ.Marrow.Marrows (поверхность захвата), если тип доступен.</summary>
-        private static void TryAddMarrowGrabSurface(GameObject go)
+        /// <summary>Пытаемся скопировать компонент(ы) захвата с существующего интерактивного предмета.</summary>
+        private static void TryCopyGrabSurface(GameObject go)
         {
             try
             {
-                var t = System.Type.GetType("SLZ.Marrow.Marrows, Il2CppSLZ.Marrow");
-                if (t == null) t = typeof(Marrows); // fallback на прямой тип interop-сборки
-                var comp = go.AddComponent(t);
-                // немного увеличиваем зону захвата мелкого предмета
-                var f = t.GetField("m_CaptureScaleMultiplier");
-                if (f != null && comp != null) f.SetValue(comp, 1.6f);
+                foreach (var rb in UnityEngine.Object.FindObjectsOfType<Rigidbody>())
+                {
+                    if (rb.gameObject == go) continue;
+                    // берём первый предмет, у которого есть компонент из namespace SLZ.Marrow (Marrows и т.п.)
+                    bool copied = false;
+                    foreach (var comp in rb.GetComponents<Component>())
+                    {
+                        if (comp == null) continue;
+                        var t = comp.GetType();
+                        if (t.Namespace == null || !t.Namespace.StartsWith("SLZ.Marrow")) continue;
+                        if (t.Name == "Rigidbody" || t.Name.Contains("Health") || t.Name.Contains("Brain")) continue;
+                        CopyComponent(comp, go);
+                        copied = true;
+                    }
+                    if (copied)
+                    {
+                        MelonLogger.Msg("Bridge: поверхность захвата скопирована с игрового предмета.");
+                        return;
+                    }
+                }
             }
             catch (Exception e)
             {
-                MelonLogger.Warning($"Bridge: Marrows не добавлен ({e.Message}) — чип всё равно физический объект с коллайдером, руки его возьмут.");
+                MelonLogger.Warning($"Bridge: TryCopyGrabSurface — {e.Message} (не критично).");
             }
         }
 
-        private static void TryCreateChipLabel(GameObject chipGO)
+        private static void CopyComponent(Component original, GameObject destination)
         {
-            try
+            var type = original.GetType();
+            var dest = destination.GetComponent(type);
+            if (dest == null) dest = destination.AddComponent(type);
+            foreach (var field in type.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
             {
-                var labelGO = new GameObject("ChipLabel");
-                labelGO.transform.SetParent(chipGO.transform, false);
-                labelGO.transform.localPosition = new Vector3(0, 0.06f, 0);
-                var tmpType = System.Type.GetType("TMPro.TextMeshPro, Unity.TextMeshPro");
-                if (tmpType != null)
-                {
-                    var tmp = labelGO.AddComponent(tmpType);
-                    tmpType.GetProperty("text")?.SetValue(tmp, CHIP_NAME);
-                    return;
-                }
-                UnityEngine.Object.Destroy(labelGO);
+                if (field.IsStatic || field.FieldType == typeof(Transform) || field.FieldType == typeof(Rigidbody)) continue;
+                try { field.SetValue(dest, field.GetValue(original)); } catch { }
             }
-            catch { /* подпись не критична */ }
+            foreach (var prop in type.GetProperties(BindingFlags.Instance | BindingFlags.Public))
+            {
+                if (!prop.CanRead || !prop.CanWrite) continue;
+                if (prop.Name == "transform" || prop.Name == "gameObject" || prop.Name == "name") continue;
+                try { prop.SetValue(dest, prop.GetValue(original, null), null); } catch { }
+            }
         }
     }
 }

@@ -69,7 +69,7 @@ namespace CapriMod
         private void Evaluate()
         {
             if (_equipCooldownFrames > 0) { _equipCooldownFrames--; return; }
-            if (Main.Rig == null || Main.Rig.m_Headpoint == null) return;
+            if (GameBridge.FindHeadpoint() == null) return;
 
             float dist = Vector3.Distance(transform.position, GameBridge.HeadPosition);
 

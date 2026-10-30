@@ -1,4 +1,5 @@
 using System;
+using System.Reflection;
 using Il2CppSLZ.Bonelab;
 using Il2CppSLZ.Marrow;
 using MelonLoader;
@@ -24,17 +25,86 @@ namespace CapriMod
             Main.Rig = rig;
             try
             {
-                Main.LeftHand = rig != null ? rig.leftHand : null;
-                Main.RightHand = rig != null ? rig.rightHand : null;
+                // публичные свойства RigManager (проверено по BoneLib): leftHand/rightHand
+                var t = rig.GetIl2CppType();
+                Main.LeftHand = GetHandProp(rig, t, "leftHand");
+                Main.RightHand = GetHandProp(rig, t, "rightHand");
             }
             catch (Exception e) { MelonLogger.Warning($"GameBridge hands: {e.Message}"); }
         }
 
-        public static Vector3 HeadPosition =>
-            Main.Rig?.m_Headpoint != null ? (Vector3)Main.Rig.m_Headpoint.position : Vector3.zero;
+        /// <summary>Вызов get-метода через стандартный рефлексивный вызов Il2CppInterop
+        /// (main thread — из PlayerLocator/Melon OnUpdate).</summary>
+        private static Hand GetHandProp(RigManager rig, Type t, string propName)
+        {
+            try
+            {
+                foreach (var m in t.GetMethods())
+                {
+                    if (!string.Equals(m.Name, "get_" + propName, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (m.GetParameters().Length != 0) continue;
+                    return m.Invoke(rig, null) as Hand; // Il2CppInterop поддерживает reflection для il2cpp-типов
+                }
+            }
+            catch { }
+            return null;
+        }
 
-        public static Quaternion HeadRotation =>
-            Main.Rig?.m_Headpoint != null ? (Quaternion)Main.Rig.m_Headpoint.rotation : Quaternion.identity;
+        public static Vector3 HeadPosition
+        {
+            get
+            {
+                var hp = FindHeadpoint();
+                if (hp == null) return Vector3.zero;
+                try { return hp.position; } catch { return Vector3.zero; }
+            }
+        }
+
+        public static Quaternion HeadRotation
+        {
+            get
+            {
+                var hp = FindHeadpoint();
+                if (hp == null) return Quaternion.identity;
+                try { return hp.rotation; } catch { return Quaternion.identity; }
+            }
+        }
+
+        /// <summary>Трансформ головы: ищем headpoint рефлексией по публичным полям/свойствам —
+        /// устойчиво к переименованиям между версиями игры. Fallback — Camera.main.</summary>
+        public static Transform FindHeadpoint()
+        {
+            var rig = Main.Rig;
+            if (rig == null) return CameraFallback();
+            try
+            {
+                var t = rig.GetIl2CppType();
+                const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                foreach (var name in new[] { "m_Headpoint", "headpoint", "Headpoint", "HeadPoint" })
+                {
+                    var fld = t.GetField(name, F);
+                    if (fld != null && fld.FieldType == typeof(Transform))
+                    {
+                        var v = fld.GetValue(rig) as Transform;
+                        if (v != null) return v;
+                    }
+                    var prp = t.GetProperty(name, F);
+                    if (prp != null && prp.CanRead && typeof(Transform).IsAssignableFrom(prp.PropertyType))
+                    {
+                        var v = prp.GetValue(rig, null) as Transform;
+                        if (v != null) return v;
+                    }
+                }
+            }
+            catch { /* межпоточно/версионно — падаем на камеру */ }
+            return CameraFallback();
+        }
+
+        private static Transform CameraFallback()
+        {
+            var cam = Camera.main;
+            return cam != null ? cam.transform : null;
+        }
 
         public static Vector3 ViewDirection
         {
@@ -42,8 +112,8 @@ namespace CapriMod
             {
                 var cam = Camera.main;
                 if (cam != null && cam.transform != null) return cam.transform.forward;
-                if (Main.Rig?.m_Headpoint != null)
-                    return Main.Rig.m_Headpoint.TransformDirection(Vector3.forward);
+                var hp = FindHeadpoint();
+                if (hp != null) return hp.TransformDirection(Vector3.forward);
                 return Vector3.forward;
             }
         }
@@ -67,27 +137,33 @@ namespace CapriMod
             if (hand == null) return false;
             try
             {
+                // Только рефлексия по публичным полям/свойствам BaseController —
+                // прямые обращения к m_GripAxis/m_TriggerAxis ломают сборку на других версиях interop.
                 var c = hand.Controller;
                 if (c == null) return false;
-                grip = c.m_GripAxis;
-                trigger = c.m_TriggerAxis;
-                return true;
+                object controllerObj = ToObject(c); // Mono-обёртка: надёжная рефлексия
+                var t = controllerObj.GetType();
+                object g = GetMember(t, controllerObj, "m_GripAxis") ?? GetMember(t, controllerObj, "gripAxis");
+                object tr = GetMember(t, controllerObj, "m_TriggerAxis") ?? GetMember(t, controllerObj, "triggerAxis");
+                if (g is float gf && tr is float tf) { grip = gf; trigger = tf; return true; }
             }
-            catch
+            catch { }
+            return false;
+        }
+
+        /// <summary>Il2Cpp-объект -> Mono-объект через protected Il2CppObjectBase.ptr (рефлексией).</summary>
+        private static object ToObject(object il2cppObj)
+        {
+            if (il2cppObj == null) return null;
+            var ptrProp = il2cppObj.GetType().GetProperty("ptr",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (ptrProp != null)
             {
-                // поля могли переименоваться в другой версии игры — попробуем рефлексией
-                try
-                {
-                    var c = hand.Controller;
-                    if (c == null) return false;
-                    var t = c.GetType();
-                    object g = GetMember(t, c, "m_GripAxis");
-                    object tr = GetMember(t, c, "m_TriggerAxis");
-                    if (g is float gf && tr is float tf) { grip = gf; trigger = tf; return true; }
-                }
-                catch { }
-                return false;
+                var mono = System.Runtime.InteropServices.Marshal.PtrToStructure(
+                    (IntPtr)ptrProp.GetValue(il2cppObj, null), il2cppObj.GetType());
+                if (mono != null) return mono;
             }
+            return il2cppObj;
         }
 
         private static object GetMember(Type t, object inst, string name)
@@ -109,21 +185,11 @@ namespace CapriMod
         /// </summary>
         public static bool EquipChipToHead(GameObject chipGO)
         {
-            if (Main.Rig == null || Main.Rig.m_Headpoint == null || chipGO == null) return false;
+            if (chipGO == null || FindHeadpoint() == null) return false;
             try
             {
                 // освободить от руки, иначе рука «тянет» чип и дистанция не стабилизируется
-                try
-                {
-                    var grab = chipGO.GetComponent<Grabable>();
-                    if (grab != null)
-                    {
-                        var gp = grab.m_GripPoint;
-                        var attached = gp?.attachedTo;
-                        if (attached != null) attached.DetachObject(grab);
-                    }
-                }
-                catch { /* не критично */ }
+                TryDetachChipFromHand(chipGO);
 
                 var rb = chipGO.GetComponent<Rigidbody>();
                 if (rb != null) rb.isKinematic = true;
@@ -134,6 +200,47 @@ namespace CapriMod
             {
                 MelonLogger.Error($"GameBridge.EquipChipToHead: {e}");
                 return false;
+            }
+        }
+
+        /// <summary>Отцепить чип от руки — рефлексией по публичному API Hand.DetachObject,
+        /// без приватных полей Grabable (их имена меняются между версиями игры).</summary>
+        private static void TryDetachChipFromHand(GameObject chipGO)
+        {
+            foreach (var hand in new[] { Main.RightHand, Main.LeftHand })
+            {
+                if (hand == null) continue;
+                try
+                {
+                    var t = hand.GetIl2CppType();
+                    // 1) ищем свойство/поле с текущим захватом (AttachedGrip / attachedGrip...)
+                    const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                    object heldObj = null;
+                    foreach (var name in new[] { "AttachedGrip", "attachedGrip", "m_AttachedGrip" })
+                    {
+                        var prp = t.GetProperty(name, F);
+                        if (prp != null && prp.CanRead) { heldObj = prp.GetValue(hand, null); break; }
+                        var fld = t.GetField(name, F);
+                        if (fld != null) { heldObj = fld.GetValue(hand); break; }
+                    }
+                    if (heldObj == null) continue;
+
+                    // принадлежит ли захват именно нашему чипу?
+                    var goProp = heldObj.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public);
+                    var heldGO = goProp?.GetValue(heldObj, null) as GameObject;
+                    if (heldGO != null && heldGO != chipGO) continue;
+
+                    // 2) вызываем DetachObject(Grabable) на руке
+                    foreach (var m in t.GetMethods(F))
+                    {
+                        if (m.Name != "DetachObject") continue;
+                        var ps = m.GetParameters();
+                        if (ps.Length != 1) continue;
+                        m.Invoke(hand, new[] { heldObj });
+                        break;
+                    }
+                }
+                catch { /* версия API отличается — sticky-режим всё равно прижмёт чип к голове */ }
             }
         }
 
@@ -199,18 +306,23 @@ namespace CapriMod
         /// <summary>Компонент здоровья игрока (для self-damage при перегрузке).</summary>
         public static Player_Health LocalPlayerHealth()
         {
-            try { return Main.Rig != null ? Main.Rig.GetComponent<Player_Health>() : null; }
+            try
+            {
+                var hp = FindHeadpoint();
+                if (hp == null) return null;
+                return hp.GetComponentInParent<Player_Health>();
+            }
             catch { return null; }
         }
 
         private static bool IsOwnPlayer(GameObject go)
         {
-            if (Main.Rig == null) return false;
+            if (Main.Rig == null || go == null) return false;
             try
             {
+                // RigManager — IL2CPP-объект: сравниваем напрямую (== перегружен interop'ом)
                 var rm = go.GetComponentInParent<RigManager>();
-                if (rm == null) return false;
-                return rm.Pointer != null && rm.Pointer.IsEqualTo(Main.Rig.Pointer);
+                return rm != null && rm == Main.Rig;
             }
             catch { return false; }
         }
