@@ -1,3 +1,0 @@
-C:\Users\GameGlyk\Downloads\BoneLabCapri\src\CapriModPlugin\obj\Release\net6.0\CapriMod.csproj.AssemblyReference.cache
-C:\Users\GameGlyk\Downloads\BoneLabCapri\src\CapriModPlugin\obj\Release\net6.0\CapriMod.GeneratedMSBuildEditorConfig.editorconfig
-C:\Users\GameGlyk\Downloads\BoneLabCapri\src\CapriModPlugin\obj\Release\net6.0\CapriMod.csproj.CoreCompileInputs.cache
